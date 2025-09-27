@@ -1,0 +1,572 @@
+---
+title: "NBA Project"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r list of packages, include = F}
+setwd("C:/Users/emma3/OneDrive/Documents/Spring 2025/Statistical Learning/NBA Project")
+
+# data manipulation
+library(dplyr)
+
+# plotting
+library(ggcorrplot)
+library(ggbiplot)
+library(paletteer)
+library(GGally)
+
+# modeling
+library(mclust)
+```
+
+# Objective
+
+The objective of this cluster analysis is to discover latent patterns among both players and teams in the NBA. In sports data science, clustering is a useful tool to help group players or teams by skill levels and specialties. On the individual player level, we can use this cluster analysis to help decide which players would be a good match-up in practices or games. Further, the team comparisons can provide which teams perform alike and why, uncovering potential strong-suits and weaknesses to maintain and improve upon.
+
+# The Data
+
+The Data is from the GitHub user NocturneBear titled [NBA Data 2010-2024](https://github.com/NocturneBear/NBA-Data-2010-2024/tree/main?tab=readme-ov-file) (MIT License) and includes records from the 2010 to 2024 seasons.
+
+```{r raw data, include = F}
+all.data <- read.csv("all.data.csv", header = T)
+```
+
+```{r all data}
+glimpse(all.data)
+```
+
+The full variable breakdown is available on the GitHub repository linked at the top of the page.
+
+### Player Data
+
+One way we split up the data is by individual players, focusing on the most recent season available. That is, the 2023-2024 season.
+
+```{r player import, include = F}
+player.stats <- read.csv("player.stats.csv", header = T)
+```
+
+```{r player stats}
+glimpse(player.stats)
+```
+
+The variable breakdown is as follows:
+
+-   `playerID`: Unique player identification number
+-   `playerName`: Player's full name
+-   `position`: Center (C), forward (F), guard (G), or N/A (X)
+-   `minutes`: Total minutes on the court all season
+-   `FGper`: Field goal (two-point) percentage
+-   `TPper`: Three-point percentage
+-   `FTper`: Free throw percentage
+-   `rebounds`: Total rebounds all season
+-   `assists`: Total assists all season
+-   `steals`: Total steals all season
+-   `blocks`: Total blocks all season
+-   `turnovers`: Total turnovers all season
+-   `fouls`: Total personal fouls all season
+-   `points`: Total points all season
+
+### Team Data
+
+Another way we split up the data is by teams.
+
+```{r team import, include = F}
+team.data <- read.csv("team.data.csv", header = T)
+team.data <- team.data %>% mutate(teamID = as.factor(teamID))
+```
+
+```{r team data}
+glimpse(team.data)
+```
+
+Specifically, we focused in on the most recent available season, that is, 2023-2024
+
+```{r team data 2024, include = F}
+team.data2324 <- team.data %>%
+  filter(season == "2023-24") %>%
+  select(-season)
+```
+
+```{r team data 2324}
+glimpse(team.data2324)
+```
+
+The variables are similar to the player data, but with the individual observations coming from the whole team, not an individual player. Additionally, `teamID` and `teamCode` are the unique identifiers for this data, where the former is a unique string of integers, and the latter is a 3-letter team name code.
+
+\newpage
+
+# Player Data
+
+## All Players
+
+Starting off with the player stats data frame for the 2023-2024 season, we removed missing values, since they were often associated with bench players and not representative of the active players we intend to cluster.
+
+```{r player stats na, include = F}
+player.stats <- na.omit(player.stats)
+```
+
+### Variables & Correlations
+
+We began our exploratory analysis by taking a look at all of the following numeric variables, which were recorded alongside the player's name, unique ID number, and position (if available).
+
+```{r ps all numeric variables}
+player.stats.num <- player.stats[, -c(1,2,3)] # numeric cols only
+
+colnames(player.stats.num)
+```
+
+Immediately, we checked for potential correlation among the variables.
+
+```{r ps corr, echo = F}
+ggcorrplot(cor(player.stats.num), type = "lower", colors = rev(c("red", "pink", "white")), lab = T)
+```
+
+The corrplot, complete with accompanying pairwise correlation coefficients for each variable, indicates that nearly all variables are moderately-to-strongly correlated with one another, aside from the stats that take the form of percentages. This is likely due to the playing time variable, such that high playing time enables players to increase their points scores, assists, turnovers, etc.
+
+On the other hand, field goal, three point, and free throw percentages are more-so independent from minutes played. This is because they are scored based on mean performance (a rate), not aggregated and ranging from zero to infinity, as the other variables are.
+
+Further, we can visualize the dependence relations through a pairs plot.
+
+```{r ps pairs, echo = F, message = F, warning = F}
+options(ggally.progress = F)
+ps.pairs <- ggpairs(player.stats.num, 
+        upper = list(continuous = wrap("blank")),
+)
+ps.pairs
+```
+
+The pairs plot, accompanied by densities for each variable, provides further confirmation that minutes played has a great effect on many of the stats provided. Since many density curves are skewed to the right, with high concentrations of observations falling in the lower range for each (non-percentage) variable, this reflects that minimal playing time is associated with a lack of attempts to increase stats.
+
+Building off of these observations, we decided to move forward with the player data by omitting observations from players with negligible playing time. That is, we filtered the data such that we were left with players who regularly compete throughout the season. The best way to do this is by only considering players who play at least 1000 minutes per regular season, averaging at least 12 minutes per game.
+
+### "Players Who Actually Play"
+
+Therefore, the data moving forward for player stat consideration is as follows:
+
+```{r actually plays data}
+actually.plays <- player.stats %>% filter(minutes > 1000)
+glimpse(actually.plays)
+```
+
+Note that from here, we have decreased the number of observations from 514 players down to 263 that best represent the goal of this cluster analysis.
+
+Looking at the updated pairs plot, we see some change in the density curves.
+
+```{r ap pairs, echo = F, message = F, warning = F}
+options(ggally.progress = F)
+ap.pairs <- ggpairs(actually.plays[, -c(1,2,3)], 
+        upper = list(continuous = wrap("blank")),
+)
+ap.pairs
+```
+
+Specifically, the total minutes is more evenly distributed than before, and many of the other density plots have less-concentrated peaks on the left side of each distribution. Still, there is heavy right skews, but this is as expected with the presence of "star" players within the data who exhibit higher stats, overall. Still, this will be more representative of the goal to cluster players based on talent levels.
+
+### Full Player Data Clustering
+
+From here, we used `Mclust` to cluster the players into various numbers of clusters based on different hypotheses.
+
+#### Model-Suggested Clusters
+
+For the first run of `Mclust`, we left it up to the function to decide the number of clusters. Note that the data was scaled upon execution.
+
+```{r Mclust decides}
+ap.num <- actually.plays[, -c(1,2,3)] # numeric cols only
+M.ap <- Mclust(scale(ap.num))
+summary(M.ap)
+```
+
+According to the unconstrained input, the model suggests 4 components that are ellipsoidal and of equal orientation (VVE). The reported BIC is 6207.944, which is minimal in the unconstrained setting, suggesting that adding constraints will increase BIC.
+
+Next, we took a look at the clustering classifications of each player.
+
+```{r Md player class, echo = F}
+set.seed(1)
+M.ap.class <- M.ap$classification
+lapply(split(actually.plays$playerName, as.integer(M.ap.class)), sort)
+```
+
+As a basketball fan, some of these players falling into the same group should make sense. For example, seeing 2 tall guys such as Minnesota's own Rudy Gobert and Milwaukee's Giannis Antetokounmpo within cluster 4 makes sense. In fact, seeing any two players of similar position grouped together is reassuring.
+
+However, this is not always the case within this model. In fact, we see in cluster 1 that Minnesota's Mike Conley, a guard, is in the same group as Denver's Kawhi Leonard, a forward. For reference, Conley stands at around 6ft tall as compared to Leonard, who is not only 7 inches taller, but also is cited to have a wingspan longer than 7ft, according to Wikipedia. Would these two players be a favorable one-on-one match-up? Probably not.
+
+Therefore, perhaps some constraints should be introduced based on the position on record for each player. This leads to the Player Split by Position section in our analysis (see below after proceeding section).
+
+#### PCA Introduction
+
+Before moving on, be sure to note that we also conducted the unconstrained clustering using Principal Component Analysis (PCA).
+
+```{r pca md}
+pc.ap <- prcomp(ap.num, scale. = T)
+summary(pc.ap)
+pc.ap$rotation[,1:5]
+
+M.ap.pc <- Mclust(pc.ap$x[,1:5])
+summary(M.ap.pc)
+```
+
+This time, we used 5 principal components (PCs) in the otherwise-unconstrained `Mclust` model. The cumulative proportion of variance is around 84% explained by the 5 PC variables. This reduced the dimension of the variables from 11 to 5, which is useful since some variables share much of the same information.
+
+The resulting model has 6 components, each of which is described as diagonal with equal shape (VEI). The BIC value is much lower here than before, recorded at 3986.184, reflecting the decreate in parameters.
+
+Again, we could observe the player classifications under this model. In alignment with the previous results, let's simply look at the player positions under each class, as follows.
+
+```{r pc Md player class, echo = F}
+M.ap.pc.class <- M.ap.pc$classification
+lapply(split(actually.plays$position, as.integer(M.ap.pc.class)), sort)
+```
+
+As we can see, there is a mixture of positions within each of the 6 clusters, where "C" is center, "F" is forward, "G" is guard, and "X" is an imputed value when the position was not provided by the data. So, matching up players of opposite positions within each cluster is not overly useful, especially when a position within a cluster occurs with frequency 1.
+
+## Players Split by Position
+
+With these latent discoveries in the player stats data, we decided to run 3 separate clustering models based on each position. That is, split the data up based on listed position, such that we are left with a data frame for centers, forwards, and guards separately. Note that this then eliminates the 8 "X" position observations, as these positions were not provided for the associated players. Then, we can proceed with the remaining 255 players as described.
+
+For each of the position-based clustering models, we continue using `Mclust` with PCA. This ensures dimension-reduction among the input variables, as explained in the previous section. Also, we constrained each model with 3 clusters, aiming to represent 3 talent levels. The motivation for this was the idea of Varsity, Junior Varsity, and B-Squad teams.
+
+### Centers
+
+There are 41 players in the center position data.
+
+#### PCA
+
+```{r centers pc}
+centers <- actually.plays %>% filter(position == "C") %>% select(-position)
+
+pc.c <- prcomp(centers[, -c(1, 2)], scale = T)
+summary(pc.c)
+pc.c$rotation[,1:4]
+```
+
+For visualization purposes, here is the biplot displaying PC1 and PC2:
+
+```{r centers pcbiplot, echo = F, message = F, warning = F}
+ggbiplot(pc.c,
+         obs.scale = 1,
+) +
+  scale_color_paletteer_d("yarrr::google") +
+  geom_point(alpha = 0.4, size = 1) +
+  theme_classic() +
+  xlim(-4, 4) +
+  ylim(-4, 4)
+```
+
+We used 4 principal components for the centers data, which cumulatively explain around 83% of the variation. PC1 is generally inclusive of all variables, suggesting commonalities in all provided player stats, with the exception of a slightly negatively loaded `FGper`. PC2 contrasts `FGper` with `TPper` and `FTper`, highlighting scoring range. PC3 contrasts `assists` with `blocks` primarily, an offensive/defensive comparison, and PC4 contrasts `fouls` with `points`, or even slightly with `FGper` and `FTper`.
+
+Centers are typically thought of as "the big guys" in basketball, so it makes sense for some of these principal components to pick up on the actions of that type of player. A center is typically playing close to the basket on offense, meaning there are more likely to have a higher `FGper` that `TPper`, as contrasted with PC2. Also, they tend to have many `blocks`, as highlighted with PC3.
+
+#### Mclust
+
+Now, lets take a look at a model utilizing these 4 PCs with the accompanied classifications.
+
+```{r centers mc}
+c.pc4 <- pc.c$x[, 1:4]
+
+c.pc4.clust <- Mclust(c.pc4, G = 3) 
+summary(c.pc4.clust)
+c.pc4.class <- c.pc4.clust$classification
+lapply(split(centers$playerName, as.integer(c.pc4.class)), sort)
+```
+
+One important note is that this split based on position is much more digestible to interpret. Instead of looking at a list spanning over 250 names and trying to make sense of them, we now look at a subset that is easier to draw comparisons on. Right away, cluster 2 groups Kristaps Porzingis and Nikola Jokic together, a pair of players that are regularly compared in the NBA. Therefore, a model-based suggestion to match-up the 2 players appears justified.
+
+Another way to visualize these cluster is by looking at the following pairs plot:
+
+```{r center pairs, echo = F, message = F, warning = F}
+options(ggally.progress = F)
+
+gg.c <- cbind(centers, cluster = as.factor(c.pc4.class))
+
+c.pairs <- ggpairs(gg.c, 
+        columns = 3:13,
+        aes(color = cluster, fill = cluster, alpha = 0.25),
+        upper = list(continuous = wrap("blank")),
+        legend = 1
+) +
+  scale_color_paletteer_d("yarrr::google") +
+  scale_fill_paletteer_d("yarrr::google") +
+  guides(alpha = "none")
+
+c.pairs
+```
+
+There are many facets to look at through this visual, but let's just build on the previously drawn observation. If we look at class 2 (red), the one with Porzingis and Jokic, we see that they are in the cluster with the highest range of `minutes` as well as `points`, naturally. They also have the highest `FTper`. We may consider this group to be "Varsity" out of the 3 clusters, depending on the bias of the interpreter.
+
+### Forwards
+
+Continuing along with a similar process, we now consider the 106 forward position players.
+
+#### PCA
+
+```{r forwards pc}
+forwards <- actually.plays %>% filter(position == "F") %>% select(-position)
+
+pc.f <- prcomp(forwards[, -c(1, 2)], scale = T)
+summary(pc.f)
+pc.f$rotation[,1:5]
+```
+
+Accompanied biplot:
+
+```{r forwards pcbiplot, echo = F, message = F, warning = F}
+ggbiplot(pc.f,
+         obs.scale = 1,
+) +
+  scale_color_paletteer_d("yarrr::google") +
+  geom_point(alpha = 0.4, size = 1) +
+  theme_classic() +
+  xlim(-4, 4) +
+  ylim(-4, 4)
+```
+
+With the forwards data, 5 PCs make up around 85% of the cumulative proportion of variation. A similar interpretation hold for PC1 as observed with the centers data (see previous). Here, PC2 groups `FTper` and `TPper` to contrast with `blocks`. PC3 mainly highlights a good `FGper`, contrasting it to `FTper`, `blocks`, and `fouls`, making up a variable that nearly describes points scored during running time versus stopping time, as an idea. PC4 differentiates `TPper`, `blocks`, and `fouls` from both `assists` and `turnovers`, contrasting aggressive actions with ball release, which could be viewed more passively. Finally, PC5 contrasts `blocks` and `steals` from `rebounds`, `fouls`, and `FTper`, which differentiate aggressive defense moves from other aggressive behaviors.
+
+Forwards are typically the most versatile players. They have a good shooting range and tend to fall in the mid-range of heights within the NBA. They are aggressive on both sides of the court, which the principal components seem to pick up on.
+
+#### Mclust
+
+Moving along, we now plug in the 5 PCs into `Mclust`.
+
+```{r forwards mc}
+f.pc5 <- pc.f$x[, 1:5]
+
+f.pc5.clust <- Mclust(f.pc5, G = 3) 
+summary(f.pc5.clust)
+f.pc5.class <- f.pc5.clust$classification
+lapply(split(forwards$playerName, as.integer(f.pc5.class)), sort)
+```
+
+Something worth noting is that these clusters vary in size more that the clusters found with the center position players. For the forwards, cluster 1 is about 3 times the size of cluster 3. If we are still basing the 3 clusters in terms of talent level, this just means we have a non-uniform distributions of our hypothesized skill groups, which is no cause for concern. Adjusting the number of clusters may make the group sizes more-or-less equal, but we will continue with 3 clusters for the sake of interpretation.
+
+As an example of an interpretation, notice how Julius Randle and Karl-Anthony Towns appear in cluster 2. Minnesota traded Towns for Randle (and others) in the fall of 2024. While many MN fans were upset with this trade, it appears that the model has picked up similarities between the two players, which could support the trade decision.
+
+Another look at the classifications reveals that many of the decades-long stars fall into cluster 1. With names like Kevin Durant, Kawhi Leonard, Jimmy Butler, Paul George, and, of course, LeBron James. The NBA veterans are accompanied by some rising-in-status players, such as Minnesota's beloved 6th Man of the Year, Naz Reid. One way to utilize this observation is to pair up newer players with the seasoned ones, such that the newer stars gain wise expertise from their counterparts to improve their game so they, too, can become one of the greats.
+
+As a wrap-up for the forward player analysis, here is the pairs plot based on cluster classifications:
+
+```{r forward pairs, echo = F, message = F, warning = F}
+options(ggally.progress = F)
+
+gg.f <- cbind(forwards, cluster = as.factor(f.pc5.class))
+
+f.pairs <- ggpairs(gg.f, 
+        columns = 3:13,
+        aes(color = cluster, fill = cluster, alpha = 0.25),
+        upper = list(continuous = wrap("blank")),
+        legend = 1
+) +
+  scale_color_paletteer_d("yarrr::google") +
+  scale_fill_paletteer_d("yarrr::google") +
+  guides(alpha = "none")
+
+f.pairs
+```
+
+It may be less clear between clusters 1 (blue) and 2 (red) which should be regarded as "better", but it may be safe to assume cluster 3 (yellow) could represent the "B-Squad" according to this model. That is, cluster 3 players fall in the lower range for `minutes`, thus, having lower `assists`, `steals`, `blocks`, etc. It is important to be aware of the percentage variables here to not draw an uninformed conclusion, as cluster 3 has a strong `TPper` concentration in the higher range, yet these players also see the line less as a consequence of less playing time.
+
+### Guards
+
+To wrap up the position analysis, let's take a look at the guard position data. Here, there are 108 player observations listed.
+
+#### PCA
+
+```{r guards pc}
+guards <- actually.plays %>% filter(position == "G") %>% select(-position)
+
+pc.g <- prcomp(guards[, -c(1, 2)], scale = T)
+summary(pc.g)
+pc.g$rotation[,1:5]
+```
+
+Biplot:
+
+```{r guards pcbiplot, echo = F, message = F, warning = F}
+ggbiplot(pc.g,
+         obs.scale = 1,
+) +
+  scale_color_paletteer_d("yarrr::google") +
+  geom_point(alpha = 0.4, size = 1) +
+  theme_classic() +
+  xlim(-4, 4) +
+  ylim(-4, 4)
+```
+
+Again, we proceed with 5 principal components for this position's data. 5 PCs provide around 85% of the cumulative proportion of variance. PC1, once more, describes the variables in unison. PC2 contrasts `TPper` and `FTper` with `blocks` and `rebounds`, describing scoring range versus measures of control near the basket. PC3 contrasts `FGper` and `TPper` with `turnovers`, that is, point acquisition with losing the ball. PC4 differentiates `FGper` and `assists` from `fouls` and `blocks`, specifically offensive versus defensive stats. Lastly, PC5 contrasts `blocks` with `fouls`, describing the subtle differences in contact when trying to defend the ball.
+
+Guards are typically the shortest men on the court, who specialize in ball handling and play-making. They can be described as "scrappy", trying to both make plays happen on offense and stop them cold on defense. So, PC2 describes the shooting range of these players well, along with a lack of under-the-basket presence to up their blocking and rebounding stats. Further, PC4 and PC5 describe ball control, closely drawing on attempts to snag the ball away on defense. Specifically, PC5 describes the moment where an attempted steal or block can turn into a foul if executed poorly.
+
+#### Mclust
+
+Plugging the 5 PCs into `Mclust`,
+
+```{r guards mc}
+g.pc5 <- pc.g$x[, 1:5]
+
+g.pc5.clust <- Mclust(g.pc5, G = 3) 
+summary(g.pc5.clust)
+g.pc5.class <- g.pc5.clust$classification
+lapply(split(guards$playerName, as.integer(g.pc5.class)), sort)
+```
+
+The resulting model provides a diagonal, equal shape (VEI) fit with unequal cluster observation sizes. Cluster 2 contains a few big names, such as Russel Westbrook, James Harden, and Kyrie Irving. It also has Minnesota's Anthony Edwards and LA's Luka Doncic, who are currently (as of late April 2025) facing off in the NBA playoffs. These two players are an intense match-up, which gives context to the clustering.
+
+Moving on from the list of names, the pairs plot reveals more about the nature of the clusters.
+
+```{r guard pairs, echo = F, message = F, warning = F}
+options(ggally.progress = F)
+
+gg.g <- cbind(guards, cluster = as.factor(g.pc5.class))
+
+g.pairs <- ggpairs(gg.g, 
+        columns = 3:13,
+        aes(color = cluster, fill = cluster, alpha = 0.25),
+        upper = list(continuous = wrap("blank")),
+        legend = 1
+) +
+  scale_color_paletteer_d("yarrr::google") +
+  scale_fill_paletteer_d("yarrr::google") +
+  guides(alpha = "none")
+
+g.pairs
+```
+
+Cluster 2 (red) has the widest spread across most of the variables, whereas cluster 3 (yellow) seems to concentrate in the higher range for many of the plots. Cluster 3 may describe talented players who risk foul trouble, as seen by the higher concentration in the upper range of `fouls`. Depending on the severity and time of the game, these plays may be risky on the court, yet their payoff could be high in terms of consistency. Clusters 2 and 3 share the right upper tails on many of the variable density distributions, so choosing which is "JV" or "Varsity" could be a toss-up. However, cluster 1 most likely represents the hypothesized "B-Squad" group, as they take on the left-ends of the distributions.
+
+\newpage
+
+# Team Data
+
+By using a different manipulation tactic for the original data, we cleaned up the data set such that each observation comes from an individual team, instead of an individual player. From here, a similar process takes place as seen in the Player Data section. We will begin the team analysis by taking a look at the 2023-2024 season.
+
+### Variables & Correlations
+
+First, note the variables utilized.
+
+```{r team all numeric variables}
+team.data.num <- team.data2324[, -c(1,2)] # numeric cols only
+
+colnames(team.data.num)
+```
+
+Again, we have `FGper`, `TPper`, `FTper` as percentage (rate) variables, with the rest being aggregate scores.
+
+Then, we checked for correlation among the variables.
+
+```{r team corr, echo = F}
+ggcorrplot(cor(team.data.num), type = "lower", colors = rev(c("red", "pink", "white")), lab = T)
+```
+
+Most variables are weakly correlated, aside from `points`, `FGper`, `TPper`, and `assists`, who all share moderate-to-strong pairwise correlation coefficients. This is to be expected, as they all describe the typical scoring breakdown. Additionally, `turnovers` and `TPper` have a moderate negative correlation, which PCA may highlight.
+
+As another visual, here is a pairs plot of the team data variables:
+
+```{r team pairs, echo = F, message = F, warning = F}
+options(ggally.progress = F)
+team.pairs <- ggpairs(team.data.num, 
+        upper = list(continuous = wrap("blank")),
+)
+team.pairs
+```
+
+The density plots along the diagonal show that many of the distributions form a normal-like or uniform-like curve. This is quite different than the skewness seen in the player data plots. There are only 30 observations in the 2023-2023 team data, as compared to the larger player data set, yet the observation that the distributions are uniform/normal-like suggests that teams are more-or-less the same as compared to player differences, which vary more.
+
+### PCA
+
+To reduce the dimension of the variables, we used principal components.
+
+```{r team pca}
+pc.t <- prcomp(team.data.num, scale = T)
+summary(pc.t)
+pc.t$rotation[,1:4]
+```
+
+```{r teams pcbiplot, echo = F, message = F, warning = F}
+ggbiplot(pc.t,
+         obs.scale = 1,
+) +
+  scale_color_paletteer_d("yarrr::google") +
+  geom_point(alpha = 0.4, size = 1) +
+  theme_classic() +
+  xlim(-3, 3) +
+  ylim(-3, 3)
+```
+
+4 PCs provided around 80% of the cumulative proportion of variance. PC1 seems to contrast good stats with `turnovers`, the only stat that has a negative connotation attached to it. PC2 describes events that typically occur when the ball is in the air, that is `turnovers`, `rebounds`, and `assists`, versus `FTper` and `steals`, which are associated with extra scoring opportunities. PC3 contrasts `rebounds` with `assists`, distinguishing random ball movement with controlled movement, and PC4 groups `FTper`, `blocks`, and `turnovers`, perhaps high-intensity stats.
+
+It will be interesting to see how the principal components highlight differences between the teams. So, the next step is to run `Mclust`.
+
+### Mclust
+
+First, we fit a model with no additional constraints to see how many clusters it suggests.
+
+```{r team unconstrained}
+t.pc4 <- pc.t$x[, 1:4]
+
+set.seed(1)
+t.pc4.clust <- Mclust(t.pc4) 
+summary(t.pc4.clust)
+t.pc4.class <- t.pc4.clust$classification
+lapply(split(team.data2324$teamCode, as.integer(t.pc4.class)), sort)
+```
+
+Under the unconstrained model, `Mclust` suggests 9 ellipsoidal, equal volume and shape (EEV) clusters with a BIC of 326.4428. It is most interesting to see that the Boston Celtics are clustered alone, as they had a spectacular 2023-2024 season, sealing it with the NBA Championship title. We see the MN Timberwolves are clustered in group 6, alongside the Phoenix Suns, LA Lakers, and Indiana Pacers, who all ran quick offenses but struggled to stay consistent defensively throughout the year. Overall, 9 clusters may be too many for our purposes, so let's implement a constraint on the clusters moving forward.
+
+#### 5 Clusters
+
+We chose to reduce the clusters down to 5 to see which teams were alike and interpret why. The number 5 was mostly chosen at random, but out of 30 teams, it seemed to create somewhat equal cluster sizes. The results are as follows.
+
+```{r team clust 2}
+t.pc4.clust2 <- Mclust(t.pc4, G = 5) 
+summary(t.pc4.clust2)
+t.pc4.class2 <- t.pc4.clust2$classification
+lapply(split(team.data2324$teamCode, as.integer(t.pc4.class2)), sort)
+```
+
+```{r team clust 2 pairs, echo = F, message = F, warning = F}
+options(ggally.progress = F)
+
+gg.t <- cbind(team.data2324, cluster = as.factor(t.pc4.class2))
+
+t.pairs <- ggpairs(gg.t, 
+        columns = 3:11,
+        aes(color = cluster, fill = cluster, alpha = 0.25),
+        upper = list(continuous = wrap("blank")),
+        legend = 1
+) +
+  guides(alpha = "none")
+
+t.pairs
+```
+
+Going cluster-by-cluster, we can draw some observations about the different skill sets of the teams. First, cluster 1, including the San Antonio Spurs and the Utah Jazz, displays the highest rate of `turnovers` by a considerable margin. Further, they fall in the lower range for `steals`, suggesting that the teams lacked ball control and extra possessions. Cluster 2, with the Milwaukee Mavericks, Denver Nuggets, and Cleveland Cavaliers, to name a few, were consistent with each other in high scoring games, i.e. `points`, as well as moderate `rebounds` throughout the season. The Miami Heat, New York Knicks, Chicago Bulls, and Houston Rockets in cluster 3 displayed low `turnovers`, `blocks`, and `assists`, with a moderate-to-high amount of `steals`. This highlights their defensive and offensive specialties and weaknesses, as compared to the other teams. Cluster 4 has the Minnesota Timberwolves, Boston Celtics, and Indiana Pacers, among others, which were 3 out of the 4 teams who played in the 3rd round of the 2024 NBA playoffs. These teams share high shooting percentages and `points`, as well as lots of `blocks` throughout the regular season. Finally, cluster 5, with 1 out of the 8 teams to make the playoffs, i.e. the Orlando Magic, scored low in `points` throughout the season, as well as low `rebounds` and `assists` with somewhat high `turnovers`. These teams could be viewed as lacking aggression during the 2023-2024 season.
+
+## Throwback Season
+
+A lot can change year-to-year for each team in the NBA, let alone over the course of several seasons. So, let's compare the previous model with a different season selection. This final analysis of the teams data will compare clusters presented in the previous section for the 2023-2024 season with clusters from the 2013-2014 season.
+
+Again, we used PCA, although discussion about this part of the process will be omitted due to similarity among findings previously stated. Instead, we will present the `Mclust` model with it's results.
+
+```{r decade data, include = F}
+team.data1314 <- team.data %>%
+  filter(season == "2013-14") %>%
+  select(-season)
+
+t.num1314 <- team.data1314[, -c(1,2)] # numeric cols only
+
+pc.t1314 <- prcomp(t.num1314, scale = T)
+summary(pc.t1314)
+
+t.pc1314 <- pc.t1314$x[, 1:5]
+
+t.clust1314 <- Mclust(t.pc1314, G = 5) 
+summary(t.clust1314)
+t.class1314 <- t.clust1314$classification
+```
+
+```{r decade mc list}
+lapply(split(team.data1314$teamCode, as.integer(t.class1314)), sort)
+```
+
+As expected, the 2013-2014 clusters are quite different from the 2023-2024 ones. In fact, the maximum similarity is that 3 teams are within the same cluster for both seasons, that is, the LA Lakers, Oklahoma City Thunder, and Phoenix Suns. Any other cluster may have a pair of 2 teams similar to the previous clustering, at most. So, this supports the notion that clustering may only be useful to draw conclusions on a small time scale, much smaller than a decade difference.
