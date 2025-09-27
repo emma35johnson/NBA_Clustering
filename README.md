@@ -1,4 +1,4 @@
-# NBA_Clustering
+# NBA Clustering
 
 Here is a project I completed with a collegue at the University of Minnesota-Duluth on the clustering of NBA players and teams.
 
